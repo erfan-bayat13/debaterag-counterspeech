@@ -111,7 +111,7 @@ class HateAssessmentSystem:
         self.retriever = retriever
         #self.llm = GoogleAPIPlayer(api_key=api_key)
         # mistralai/Mistral-7B-Instruct-v0.2
-        self.llm = TogetherAIPlayer(model_name="google/gemma-2-9b-it", api_key=api_key)
+        self.llm = TogetherAIPlayer(model_name="meta-llama/Llama-4-Scout-17B-16E-Instruct", api_key=api_key)
         
     def process_query(self, user_query: str, search_method: str = "semantic", 
                       num_results: int = 5, order_by: str = "similarity") -> Dict[str, Any]:
@@ -560,7 +560,7 @@ if __name__ == "__main__":
     
     # Initialize components
     retriever = RAGRetriever()
-    assessment_system = HateAssessmentSystem(retriever, api_key="01b4b5157ff75e07c1699159bf109bcd434c6e929d88c7b38ce7066ef69d82be")
+    assessment_system = HateAssessmentSystem(retriever, api_key="api_key_here")
     
     # Process a sample query
     result = assessment_system.process_query(
