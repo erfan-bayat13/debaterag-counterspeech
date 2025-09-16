@@ -48,7 +48,7 @@ DebateRAG combines structured debate simulation with knowledge base construction
 
 2. **Install Dependencies**
    ```bash
-   pip install together gqlalchemy pandas numpy tqdm google-generativeai
+   pip install together gqlalchemy pandas numpy tqdm
    ```
 
 3. **Database Setup**
@@ -107,7 +107,36 @@ print(f"Response: {result['response']}")
 print(f"Hate Score: {result['hate_score']}")
 ```
 
-### 4. Run Full Evaluation
+### 4. Replicating the datasets
+To replicate the datasets used in the paper follow these steps:
+
+1. Download the MultitargetCONAN dataset from the official source:
+   - [MultitargetCONAN Dataset](https://github.com/marcoguerini/CONAN)
+
+2. Download the SSTF dataset from the official source:
+   - [SSTF Dataset](https://huggingface.co/datasets/SetFit/sst5)
+
+Place the downloaded files (e.g., `multitargetconan.csv`, `sstf.csv`) in the `data/raw/` directory.
+
+
+To match the distribution and size used in our experiments, we use a stratified subsample of 996 examples.  
+Assuming you have loaded the dataset into a pandas DataFrame called `df` and imported `resample` from `sklearn.utils`:
+
+```python
+from sklearn.utils import resample
+
+# Stratified sampling maintaining TARGET distribution
+subsample = df.groupby("TARGET", group_keys=False).apply(
+    lambda x: resample(
+        x, 
+        replace=False, 
+        n_samples=int(996 * len(x) / len(df)), 
+        random_state=42
+    )
+)
+```
+
+### 5. Run Full Evaluation
 
 Evaluate the system against a benchmark dataset:
 
