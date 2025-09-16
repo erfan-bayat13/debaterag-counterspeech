@@ -574,7 +574,7 @@ def initialize_config():
         Dictionary of configuration parameters
     """
     return {
-        'quality_threshold': 7.0,  # Minimum quality score (0-10)
+        'quality_threshold': 6.0,  # Minimum quality score (0-10)
         'evaluation_model': 'meta-llama/Llama-3.3-70B-Instruct-Turbo',  # Model to use for evaluation
         'api_temperature': 0.3,  # Temperature for evaluation API calls
         'batch_size': 10  # Number of debate pairs to process in each batch

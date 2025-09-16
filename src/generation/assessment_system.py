@@ -113,6 +113,8 @@ class HateAssessmentSystem:
         # mistralai/Mistral-7B-Instruct-v0.2
         self.llm = TogetherAIPlayer(model_name="meta-llama/Llama-4-Scout-17B-16E-Instruct", api_key=api_key)
         
+        self.total_mitigation_counts = {"none": 0, "mild": 0, "strong": 0}
+
     def process_query(self, user_query: str, search_method: str = "semantic", 
                       num_results: int = 5, order_by: str = "similarity") -> Dict[str, Any]:
         """
@@ -400,6 +402,7 @@ class HateAssessmentSystem:
     def _determine_mitigation_level(self, hate_score: float) -> str:
         """
         Determine the appropriate mitigation level based on hate score.
+        Updates global counts.
         
         Args:
             hate_score: Calculated hate score (0-10)
@@ -408,12 +411,42 @@ class HateAssessmentSystem:
             String indicating mitigation level: "none", "mild", or "strong"
         """
         if hate_score < self.HATE_THRESHOLD_LOW:
+            self.total_mitigation_counts["none"] += 1
             return "none"
         elif hate_score < self.HATE_THRESHOLD_HIGH:
+            self.total_mitigation_counts["mild"] += 1
             return "mild"
         else:
+            self.total_mitigation_counts["strong"] += 1
             return "strong"
     
+    def get_mitigation_summary(self) -> Dict[str, Any]:
+        """
+        Get a summary of all mitigation decisions made during the session.
+        
+        Returns:
+            Dict containing total counts and percentages
+        """
+        total_queries = sum(self.total_mitigation_counts.values())
+        
+        if total_queries == 0:
+            return {"total_queries": 0, "counts": self.total_mitigation_counts, "percentages": {}}
+        
+        percentages = {
+            level: round((count / total_queries) * 100, 2) 
+            for level, count in self.total_mitigation_counts.items()
+        }
+        
+        return {
+            "total_queries": total_queries,
+            "counts": self.total_mitigation_counts.copy(),
+            "percentages": percentages
+        }
+        
+    def reset_counts(self):
+        """Reset the mitigation counts."""
+        self.total_mitigation_counts = {"none": 0, "mild": 0, "strong": 0}
+        
     def _generate_response(self, query: str, retrieved_content: List[Dict], 
                           mitigation_level: str, hate_score: float) -> str:
         """
@@ -440,7 +473,7 @@ class HateAssessmentSystem:
             prompt = self._create_strong_mitigation_prompt(query, retrieved_content)
         
         # Generate the response using the LLM
-        response = self.llm.generate(prompt, max_tokens=512)
+        response = self.llm.generate(prompt, max_tokens=256)
         return response
     
     def _create_normal_prompt(self, query: str, retrieved_content: List[Dict]) -> str:
@@ -451,7 +484,7 @@ User query: {query}
 
 Our system has not seen any indication that this query is problematic.
 YOU decide whether this query requires mitigation. If you believe the query contains harmful content or seeks harmful information, mitigate it.
-If you determine the query is NOT problematic, simply answer it directly and factually without any special cautioning.
+If you determine the query is NOT problematic, simply answer it directly and factually without any special cautioning or explanation.
 """
     
     def _create_mild_mitigation_prompt(self, query: str, retrieved_content: List[Dict]) -> str:
@@ -477,7 +510,7 @@ YOU decide whether this query requires mitigation. If you believe the query cont
 6. Response must be 3-4 sentences (60-80 words) maximum
 
 
-However, if you determine the query is NOT problematic, simply answer it directly and factually without any special cautioning.
+However, if you determine the query is NOT problematic, simply answer it directly and factually without any special cautioning and explanation on why it is problematic.
 
 Trust your own assessment of whether the content requires mitigation or not.
 """
@@ -536,7 +569,7 @@ YOU decide whether this query requires mitigation. If you believe the query cont
 5. Highlights the human and social impact of harmful narratives
 6. Response must be 3-4 sentences (60-80 words) maximum
 
-However, if you determine the query is NOT problematic despite our system's high hate score, simply answer it directly and factually without special cautioning.
+However, if you determine the query is NOT problematic despite our system's high hate score, simply answer it directly and factually without special cautioning and explanation on why it is problematic.
 
 Trust your own assessment of whether the content requires mitigation or not.
 """

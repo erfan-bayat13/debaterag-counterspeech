@@ -644,27 +644,26 @@ class HateCounterEvaluator:
         gold_counters = dataset['counter_narrative'].tolist() if 'counter_narrative' in dataset.columns else None
         
         # Generate counter-narratives
-        print(f"Generating counter-narratives using {search_method} search")
-        generated_counters = self.generate_counter_narratives(
-            hate_texts=hate_texts,
-            search_method=search_method
-        )
+        # print(f"Generating counter-narratives using {search_method} search")
+        # generated_counters = self.generate_counter_narratives(
+        #     hate_texts=hate_texts,
+        #     search_method=search_method
+        # )
         
         # Run evaluation metrics
-        print("Running LLM-based evaluation and toxicity metrics...")
-        evaluation_results = self.metrics.evaluate_generation(
-            hate_texts=hate_texts,
-            generated_counters=generated_counters
-        )
+        # print("Running LLM-based evaluation and toxicity metrics...")
+        # evaluation_results = self.metrics.evaluate_generation(
+        #     hate_texts=hate_texts,
+        #     generated_counters=generated_counters
+        # )
         
-        # # If gold standard counter-narratives are available, evaluate them too
-        # if gold_counters:
-        #     print("Also evaluating gold standard counter-narratives...")
-        #     gold_evaluation = self.metrics.evaluate_generation(
-        #         hate_texts=hate_texts,
-        #         generated_counters=gold_counters
-        #     )
-        #     evaluation_results['gold_standard'] = gold_evaluation
+        # If gold standard counter-narratives are available, evaluate them too
+        if gold_counters:
+            print("evaluating gold standard counter-narratives...")
+            evaluation_results = self.metrics.evaluate_generation(
+                hate_texts=hate_texts,
+                generated_counters=gold_counters
+            )
         
         # Add generated counters to results
         full_results = {
@@ -675,7 +674,7 @@ class HateCounterEvaluator:
             },
             'data': {
                 'hate_texts': hate_texts,
-                'generated_counters': generated_counters
+                'generated_counters': gold_counters
             },
             'metrics': evaluation_results
         }
@@ -953,7 +952,7 @@ if __name__ == "__main__":
     results = evaluator.run_full_evaluation(
         dataset_path="/Users/erfanbayat/Documents/SPAG/KB/subsampled_data.csv",
         output_path="/Users/erfanbayat/Downloads/full_eval/mistralxgemma.json",
-        #sample_size=10,  # Use a small sample for testing
+        sample_size=10,  # Use a small sample for testing
         search_method="semantic"
     )
     

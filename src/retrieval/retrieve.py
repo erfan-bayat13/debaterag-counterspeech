@@ -484,7 +484,7 @@ class RAGRetriever:
                 WITH CONFIG {"dimension": 384, "capacity": 1000, "metric": "cos"};
                 """
                 self.memgraph.execute(create_index_query)
-                print("Created vector index for HateContent embeddings")
+                #print("Created vector index for HateContent embeddings")
         except Exception as e:
             print(f"Warning: Could not ensure vector indices: {e}")
             print("Semantic search will fall back to alternative methods if vector search fails")
