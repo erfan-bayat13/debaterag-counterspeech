@@ -244,6 +244,7 @@ This system is designed for academic research in:
 4. Document any new features or modifications
 
 ## License
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 
 ## Citation
