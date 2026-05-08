@@ -1,4 +1,4 @@
-# DebateRAG
+# DebateRAG-Counterspeech
 
 A Retrieval-Augmented Generation system for generating effective counter-narratives to hate speech through structured debate generation and knowledge base construction.
 
