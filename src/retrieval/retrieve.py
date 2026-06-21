@@ -2,6 +2,7 @@ from gqlalchemy import Memgraph
 from sentence_transformers import SentenceTransformer
 import numpy as np
 import json
+import re
 from typing import List, Dict, Any, Optional
 
 class RAGRetriever:
@@ -18,6 +19,16 @@ class RAGRetriever:
         
         # Initialize the embedding model (we'll use it later)
         self.model = None
+
+    @staticmethod
+    def _sanitize_query_text(query_text: str) -> str:
+        """Remove backslashes that break Cypher string literals."""
+        return re.sub(r"\\+", " ", query_text).strip()
+
+    @staticmethod
+    def _cypher_literal(text: str) -> str:
+        """Escape text embedded in a Cypher single-quoted string."""
+        return text.replace("'", "''")
         
     def syntax_search_debate_content(self, query_text: str, limit: int = 5) -> List[Dict]:
         """
@@ -30,28 +41,27 @@ class RAGRetriever:
         Returns:
             List of matching hate paragraph nodes with their details
         """
-        # Process query text for better pattern matching
-        # Convert to lowercase for case-insensitive matching
+        query_text = self._sanitize_query_text(query_text)
         query_lower = query_text.lower()
         
-        # Split into keywords for more flexible matching
         keywords = [keyword.strip() for keyword in query_lower.split() if len(keyword.strip()) > 3]
         
-        # Create a Cypher query using CONTAINS which is more widely supported
         query = """
         MATCH (hp:HateParagraph)
         WHERE (hp.is_synthetic IS NULL OR hp.is_synthetic = false)
         AND (
         """
         
-        # Add WHERE conditions for each keyword with lowercase transformation
         conditions = []
         for keyword in keywords:
-            conditions.append(f"toLower(hp.content) CONTAINS '{keyword}'")
+            conditions.append(
+                f"toLower(hp.content) CONTAINS '{self._cypher_literal(keyword)}'"
+            )
         
-        # If no valid keywords, use the original query text
         if not conditions:
-            conditions.append(f"toLower(hp.content) CONTAINS '{query_lower}'")
+            conditions.append(
+                f"toLower(hp.content) CONTAINS '{self._cypher_literal(query_lower)}'"
+            )
         
         query += " OR ".join(conditions)
         query += """
@@ -72,8 +82,13 @@ class RAGRetriever:
                relevance_score
         ORDER BY relevance_score DESC
         LIMIT $limit
-        """.format(query_lower, 
-                  ' + '.join([f"CASE WHEN toLower(hp.content) CONTAINS '{k}' THEN 1 ELSE 0 END" for k in keywords]))
+        """.format(
+            self._cypher_literal(query_lower),
+            ' + '.join([
+                f"CASE WHEN toLower(hp.content) CONTAINS '{self._cypher_literal(k)}' THEN 1 ELSE 0 END"
+                for k in keywords
+            ]),
+        )
         
         # Execute the query
         params = {"limit": limit}
@@ -93,10 +108,9 @@ class RAGRetriever:
         Returns:
             List of matching hate paragraph nodes with their details and layer information
         """
-        # Process query text for better pattern matching
+        query_text = self._sanitize_query_text(query_text)
         query_lower = query_text.lower()
         
-        # Split into keywords for more flexible matching
         keywords = [keyword.strip() for keyword in query_lower.split() if len(keyword.strip()) > 3]
         
         # Layer 1: Debate-based content (non-synthetic)
@@ -111,18 +125,19 @@ class RAGRetriever:
         WHERE hp.is_synthetic = true
         """
         
-        # Build conditions for both queries
         conditions = []
         for keyword in keywords:
-            conditions.append(f"toLower(hp.content) CONTAINS '{keyword}'")
+            conditions.append(
+                f"toLower(hp.content) CONTAINS '{self._cypher_literal(keyword)}'"
+            )
         
-        # If no valid keywords, use the original query text
         if not conditions:
-            conditions.append(f"toLower(hp.content) CONTAINS '{query_lower}'")
+            conditions.append(
+                f"toLower(hp.content) CONTAINS '{self._cypher_literal(query_lower)}'"
+            )
         
         condition_str = " AND (" + " OR ".join(conditions) + ")"
         
-        # Add conditions and complete both queries
         common_suffix = """
         OPTIONAL MATCH (hp)-[:TALKS_ABOUT]->(t:Topic)
         OPTIONAL MATCH (hp)-[:COUNTERED_WITH]->(cp:CounterParagraph)
@@ -142,8 +157,11 @@ class RAGRetriever:
         ORDER BY relevance_score DESC
         LIMIT $limit
         """.format(
-            query_lower, 
-            ' + '.join([f"CASE WHEN toLower(hp.content) CONTAINS '{k}' THEN 1 ELSE 0 END" for k in keywords]),
+            self._cypher_literal(query_lower),
+            ' + '.join([
+                f"CASE WHEN toLower(hp.content) CONTAINS '{self._cypher_literal(k)}' THEN 1 ELSE 0 END"
+                for k in keywords
+            ]),
             "{0}"  # Placeholder for layer number
         )
         
@@ -185,7 +203,7 @@ class RAGRetriever:
             nltk_stopwords = {'a', 'an', 'the', 'and', 'or', 'but', 'is', 'are', 'was', 'were', 
                         'to', 'of', 'in', 'for', 'with', 'on', 'at', 'by', 'this', 'that'}
         
-        # Tokenize and clean the query
+        query_text = self._sanitize_query_text(query_text)
         query_lower = query_text.lower()
         tokens = word_tokenize(query_lower) if 'word_tokenize' in dir(nltk.tokenize) else query_lower.split()
         
@@ -224,33 +242,40 @@ class RAGRetriever:
         WHERE hp.is_synthetic = true
         """
         
-        # Build keyword conditions
         keyword_conditions = []
         for keyword in keywords:
-            keyword_conditions.append(f"toLower(hp.content) CONTAINS '{keyword}'")
+            keyword_conditions.append(
+                f"toLower(hp.content) CONTAINS '{self._cypher_literal(keyword)}'"
+            )
         
-        # Build phrase conditions with higher weight
         phrase_conditions = []
         for phrase in phrases:
-            phrase_conditions.append(f"toLower(hp.content) CONTAINS '{phrase}'")
+            phrase_conditions.append(
+                f"toLower(hp.content) CONTAINS '{self._cypher_literal(phrase)}'"
+            )
         
-        # If no keywords or phrases, use the entire query
         if not keyword_conditions and not phrase_conditions:
-            keyword_conditions.append(f"toLower(hp.content) CONTAINS '{query_lower}'")
+            keyword_conditions.append(
+                f"toLower(hp.content) CONTAINS '{self._cypher_literal(query_lower)}'"
+            )
         
-        # Combine all conditions
         all_conditions = keyword_conditions + phrase_conditions
         condition_str = " AND (" + " OR ".join(all_conditions) + ")"
         
-        # Define relevance scoring (phrases get higher scores)
         relevance_parts = []
-        relevance_parts.append(f"CASE WHEN toLower(hp.content) CONTAINS '{query_lower}' THEN 10 ELSE 0 END")
+        relevance_parts.append(
+            f"CASE WHEN toLower(hp.content) CONTAINS '{self._cypher_literal(query_lower)}' THEN 10 ELSE 0 END"
+        )
         
         for phrase in phrases:
-            relevance_parts.append(f"CASE WHEN toLower(hp.content) CONTAINS '{phrase}' THEN 3 ELSE 0 END")
+            relevance_parts.append(
+                f"CASE WHEN toLower(hp.content) CONTAINS '{self._cypher_literal(phrase)}' THEN 3 ELSE 0 END"
+            )
         
         for keyword in keywords:
-            relevance_parts.append(f"CASE WHEN toLower(hp.content) CONTAINS '{keyword}' THEN 1 ELSE 0 END")
+            relevance_parts.append(
+                f"CASE WHEN toLower(hp.content) CONTAINS '{self._cypher_literal(keyword)}' THEN 1 ELSE 0 END"
+            )
         
         relevance_calc = " + ".join(relevance_parts)
         

@@ -100,20 +100,63 @@ class HateAssessmentSystem:
     SIMILARITY_WEIGHT = 0.5    # Weight for similarity score
     HARMFULNESS_WEIGHT = 0.5   # Weight for harmfulness score
     
-    def __init__(self, retriever, api_key: str):
+    DEFAULT_MODEL = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+
+    def __init__(self, retriever, api_key: str, model_name: str | None = None):
         """
         Initialize the system with retriever and LLM components.
         
         Args:
             retriever: An instance of RAGRetriever for knowledge base access
-            api_key: Google AI API key for Gemini
+            api_key: Together AI API key
+            model_name: Together model id (defaults to Llama-3.3-70B-Instruct-Turbo)
         """
         self.retriever = retriever
         #self.llm = GoogleAPIPlayer(api_key=api_key)
-        # mistralai/Mistral-7B-Instruct-v0.2
-        self.llm = TogetherAIPlayer(model_name="meta-llama/Llama-4-Scout-17B-16E-Instruct", api_key=api_key)
+        self.llm = TogetherAIPlayer(
+            model_name=model_name or self.DEFAULT_MODEL,
+            api_key=api_key,
+        )
         
         self.total_mitigation_counts = {"none": 0, "mild": 0, "strong": 0}
+
+    def assess_query(
+        self,
+        user_query: str,
+        search_method: str = "semantic",
+        num_results: int = 5,
+        order_by: str = "similarity",
+    ) -> Dict[str, Any]:
+        """
+        Run retrieval, hate scoring, and mitigation selection without calling the LLM.
+
+        Returns:
+            Dict with query, hate_score, mitigation_level, assessment_details,
+            and retrieved_content — everything needed for offline generation.
+        """
+        retrieved_content = self._retrieve_content(
+            user_query, search_method, num_results, order_by=order_by
+        )
+        hate_score, assessment_details = self._calculate_hate_score(
+            user_query, retrieved_content
+        )
+        mitigation_level = self._determine_mitigation_level(hate_score)
+        return {
+            "query": user_query,
+            "hate_score": round(hate_score, 2),
+            "mitigation_level": mitigation_level,
+            "assessment_details": assessment_details,
+            "retrieved_content": retrieved_content,
+        }
+
+    def generate_from_assessment(self, assessment: Dict[str, Any]) -> str:
+        """Generate a counter-narrative from a prior assess_query() result."""
+        return self._generate_response(
+            assessment["query"],
+            assessment["retrieved_content"],
+            assessment["mitigation_level"],
+            assessment["hate_score"],
+        )
 
     def process_query(self, user_query: str, search_method: str = "semantic", 
                       num_results: int = 5, order_by: str = "similarity") -> Dict[str, Any]:
@@ -128,30 +171,11 @@ class HateAssessmentSystem:
         Returns:
             Dict containing response, assessment details, and retrieved content
         """
-        # Step 1: Retrieve relevant content from knowledge base
-        retrieved_content = self._retrieve_content(user_query, search_method, num_results,order_by=order_by)
-        
-        # Step 2: Calculate hate score based on retrieved content
-        hate_score, assessment_details = self._calculate_hate_score(user_query, retrieved_content)
-        
-        # Step 3: Determine response strategy based on hate score
-        mitigation_level = self._determine_mitigation_level(hate_score)
-        
-        # Step 4: Generate appropriate response using selected strategy
-        response = self._generate_response(user_query, retrieved_content, 
-                                          mitigation_level, hate_score)
-        
-        # Step 5: Return complete result with metadata
-        result = {
-            "query": user_query,
-            "response": response,
-            "hate_score": round(hate_score, 2),
-            "mitigation_level": mitigation_level,
-            "assessment_details": assessment_details,
-            "retrieved_content": retrieved_content,
-        }
-        
-        return result
+        assessment = self.assess_query(
+            user_query, search_method, num_results, order_by=order_by
+        )
+        response = self.generate_from_assessment(assessment)
+        return {**assessment, "response": response}
     
     def _retrieve_content(self, query: str, search_method: str, limit: int, order_by: str = "similarity") -> List[Dict]:
         """
@@ -474,18 +498,28 @@ class HateAssessmentSystem:
         
         # Generate the response using the LLM
         response = self.llm.generate(prompt, max_tokens=256)
-        return response
+        return response.strip()
+
+    def _response_output_rules(self) -> str:
+        """Shared instruction: model returns only the final reply text."""
+        return """
+Output format (required):
+- Reply with ONLY your final response text.
+- Do not explain your reasoning, assessment process, or word count.
+- Do not use preambles (e.g. "I will analyze...", "Here's my response:", "Note:").
+- Do not label sections or wrap the answer in quotes.
+"""
     
     def _create_normal_prompt(self, query: str, retrieved_content: List[Dict]) -> str:
         """Create a normal prompt with no special mitigation."""
-        return f"""Please provide a helpful, informative response to this user query:
+        return f"""Respond to this user query:
 
 User query: {query}
 
 Our system has not seen any indication that this query is problematic.
 YOU decide whether this query requires mitigation. If you believe the query contains harmful content or seeks harmful information, mitigate it.
 If you determine the query is NOT problematic, simply answer it directly and factually without any special cautioning or explanation.
-"""
+{self._response_output_rules()}"""
     
     def _create_mild_mitigation_prompt(self, query: str, retrieved_content: List[Dict]) -> str:
         """Create a prompt with mild mitigation for potentially hateful content."""
@@ -495,32 +529,30 @@ If you determine the query is NOT problematic, simply answer it directly and fac
             if item["content"]:  # Only add if there's actual content
                 counter_examples.append(item["content"])
         
-        prompt = f"""Please analyze and respond to this user query:
+        prompt = f"""Respond to this user query:
 
 User query: {query}
 
 Our system has flagged this query as potentially touching on sensitive topics (hate score: moderate).
 
-YOU decide whether this query requires mitigation. If you believe the query contains harmful content or seeks harmful information, please provide an educational response that:
+YOU decide whether this query requires mitigation. If you believe the query contains harmful content or seeks harmful information, write an educational response that:
 1. Gently corrects any misconceptions
 2. Provides factual context and nuance
 3. Maintains a balanced tone
 4. Presents multiple perspectives where appropriate
-5. Do not include disclaimers, warnings, or explanations about the nature of the content
-6. Response must be 3-4 sentences (60-80 words) maximum
+5. Does not include disclaimers, warnings, or explanations about the nature of the content
+6. Is 3-4 sentences (60-80 words) maximum
 
-
-However, if you determine the query is NOT problematic, simply answer it directly and factually without any special cautioning and explanation on why it is problematic.
+If you determine the query is NOT problematic, answer it directly and factually without explaining why it is or is not problematic.
 
 Trust your own assessment of whether the content requires mitigation or not.
-"""
+{self._response_output_rules()}"""
         
         # Add counter-speech examples if available
         if counter_examples:
-            prompt += "You may consider these reference perspectives in your response:\n\n"
+            prompt += "\nReference perspectives you may draw on:\n\n"
             for i, example in enumerate(counter_examples[:2]):
                 prompt += f"Perspective {i+1}: {example}\n\n"
-        #print(f"Debug - Mild mitigation prompt: {prompt}")
         
         return prompt
     
@@ -555,33 +587,33 @@ Trust your own assessment of whether the content requires mitigation or not.
         else:
             top_counters = []
         
-        prompt = f"""Please analyze and respond to this user query:
+        prompt = f"""Respond to this user query:
 
 User query: {query}
 
 Our system has flagged this query as potentially containing or seeking content that could promote harmful narratives (hate score: high).
 
-YOU decide whether this query requires mitigation. If you believe the query contains harmful content or seeks harmful information, please provide an educational response that:
+YOU decide whether this query requires mitigation. If you believe the query contains harmful content or seeks harmful information, write an educational response that:
 1. Directly addresses and corrects misconceptions or harmful framing
 2. Provides accurate, factual information to counter potential misinformation
 3. Maintains a respectful but firm educational tone
 4. Offers evidence-based context that promotes understanding
 5. Highlights the human and social impact of harmful narratives
-6. Response must be 3-4 sentences (60-80 words) maximum
+6. Is 3-4 sentences (60-80 words) maximum
 
-However, if you determine the query is NOT problematic despite our system's high hate score, simply answer it directly and factually without special cautioning and explanation on why it is problematic.
+If you determine the query is NOT problematic despite our system's high hate score, answer it directly and factually without explaining why it is or is not problematic.
 
 Trust your own assessment of whether the content requires mitigation or not.
-"""
+{self._response_output_rules()}"""
         
         # Add counter-speech examples if available
         if top_counters:
-            prompt += "Here are effective counter-arguments that address this type of content:\n\n"
+            prompt += "\nEffective counter-arguments that address this type of content:\n\n"
             for i, example in enumerate(top_counters):
                 prompt += f"Counter-argument {i+1}: {example}\n\n"
         
         prompt += """
-Your response should be educational rather than accusatory. Focus on providing accurate information
+Your response should be educational rather than accusatory. Focus on accurate information
 that counters harmful narratives while treating the user with respect.
 """
         
