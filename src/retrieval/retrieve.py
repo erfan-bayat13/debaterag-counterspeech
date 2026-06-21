@@ -22,13 +22,39 @@ class RAGRetriever:
 
     @staticmethod
     def _sanitize_query_text(query_text: str) -> str:
-        """Remove backslashes that break Cypher string literals."""
-        return re.sub(r"\\+", " ", query_text).strip()
+        """Prepare query text for syntax search and safe Cypher embedding."""
+        text = re.sub(r"\\+", " ", query_text)
+        # Merge letter-apostrophe-letter so tokenizers don't split "women's" -> "'s".
+        text = re.sub(r"(?<=\w)'(?=\w)", "", text)
+        text = re.sub(r"[^\w\s]", " ", text)
+        return re.sub(r"\s+", " ", text).strip()
+
+    @staticmethod
+    def _is_valid_search_term(term: str) -> bool:
+        """Skip tokens/phrases that break Cypher literals or add no signal."""
+        cleaned = term.strip()
+        if len(cleaned) < 2 or cleaned.startswith("'"):
+            return False
+        return bool(re.search(r"[a-z0-9]", cleaned, re.IGNORECASE))
 
     @staticmethod
     def _cypher_literal(text: str) -> str:
         """Escape text embedded in a Cypher single-quoted string."""
         return text.replace("'", "''")
+
+    @staticmethod
+    def _filter_search_terms(terms: list[str]) -> list[str]:
+        seen: set[str] = set()
+        kept: list[str] = []
+        for term in terms:
+            if not RAGRetriever._is_valid_search_term(term):
+                continue
+            key = term.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            kept.append(term)
+        return kept
         
     def syntax_search_debate_content(self, query_text: str, limit: int = 5) -> List[Dict]:
         """
@@ -44,7 +70,9 @@ class RAGRetriever:
         query_text = self._sanitize_query_text(query_text)
         query_lower = query_text.lower()
         
-        keywords = [keyword.strip() for keyword in query_lower.split() if len(keyword.strip()) > 3]
+        keywords = self._filter_search_terms(
+            [keyword.strip() for keyword in query_lower.split() if len(keyword.strip()) > 3]
+        )
         
         query = """
         MATCH (hp:HateParagraph)
@@ -111,7 +139,9 @@ class RAGRetriever:
         query_text = self._sanitize_query_text(query_text)
         query_lower = query_text.lower()
         
-        keywords = [keyword.strip() for keyword in query_lower.split() if len(keyword.strip()) > 3]
+        keywords = self._filter_search_terms(
+            [keyword.strip() for keyword in query_lower.split() if len(keyword.strip()) > 3]
+        )
         
         # Layer 1: Debate-based content (non-synthetic)
         layer1_query = """
@@ -208,8 +238,10 @@ class RAGRetriever:
         tokens = word_tokenize(query_lower) if 'word_tokenize' in dir(nltk.tokenize) else query_lower.split()
         
         # Extract meaningful keywords (non-stopwords, longer than 3 chars)
-        keywords = [word for word in tokens if len(word) > 3 and word not in nltk_stopwords]
-        
+        keywords = self._filter_search_terms(
+            [word for word in tokens if len(word) > 3 and word not in nltk_stopwords]
+        )
+
         # Extract potential phrases (2-3 word combinations)
         phrases = []
         # Generate bigrams if there are enough words
@@ -219,7 +251,7 @@ class RAGRetriever:
                     phrase = tokens[i] + ' ' + tokens[i+1]
                     if len(phrase) > 5:  # Only meaningful phrases
                         phrases.append(phrase)
-        
+
         # Generate trigrams if there are enough words
         if len(tokens) >= 3:
             for i in range(len(tokens) - 2):
@@ -229,6 +261,8 @@ class RAGRetriever:
                     phrase = tokens[i] + ' ' + tokens[i+1] + ' ' + tokens[i+2]
                     if len(phrase) > 8:  # Only meaningful phrases
                         phrases.append(phrase)
+
+        phrases = self._filter_search_terms(phrases)
         
         # Layer 1: Debate-based content (non-synthetic)
         layer1_query = """
