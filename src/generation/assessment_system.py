@@ -102,21 +102,34 @@ class HateAssessmentSystem:
     
     DEFAULT_MODEL = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
 
-    def __init__(self, retriever, api_key: str, model_name: str | None = None):
+    def __init__(
+        self,
+        retriever,
+        api_key: str | None = None,
+        model_name: str | None = None,
+        *,
+        llm=None,
+    ):
         """
         Initialize the system with retriever and LLM components.
         
         Args:
             retriever: An instance of RAGRetriever for knowledge base access
-            api_key: Together AI API key
+            api_key: Together AI API key (required unless llm is provided)
             model_name: Together model id (defaults to Llama-3.3-70B-Instruct-Turbo)
+            llm: Optional local/API player with a .generate(prompt, ...) method
         """
         self.retriever = retriever
-        #self.llm = GoogleAPIPlayer(api_key=api_key)
-        self.llm = TogetherAIPlayer(
-            model_name=model_name or self.DEFAULT_MODEL,
-            api_key=api_key,
-        )
+        if llm is not None:
+            self.llm = llm
+        else:
+            if not api_key:
+                raise ValueError("api_key is required when llm is not provided")
+            #self.llm = GoogleAPIPlayer(api_key=api_key)
+            self.llm = TogetherAIPlayer(
+                model_name=model_name or self.DEFAULT_MODEL,
+                api_key=api_key,
+            )
         
         self.total_mitigation_counts = {"none": 0, "mild": 0, "strong": 0}
 
