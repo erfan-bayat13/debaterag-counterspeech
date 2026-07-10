@@ -1,4 +1,5 @@
 import math
+import statistics
 import time
 import google.generativeai as genai
 from typing import List, Dict, Any, Optional, Tuple
@@ -92,14 +93,22 @@ class HateAssessmentSystem:
     System for assessing and mitigating potential hate speech in user queries.
     """
     
-    # Define threshold constants
-    HATE_THRESHOLD_LOW = 4.0    # Below this is considered non-hateful
+    # Fallback mitigation thresholds (none/light/mild/strong cut points), used
+    # only until per-dataset quartile thresholds are supplied via
+    # `mitigation_thresholds` (see compute_quartile_thresholds).
+    HATE_THRESHOLD_LOW = 2.5    # Below this is considered non-hateful
+    HATE_THRESHOLD_MID = 4.0    # Below this is light-touch review, not full mitigation
     HATE_THRESHOLD_HIGH = 7.0   # Above this requires stronger mitigation
-    
+
     # Define score weights
     SIMILARITY_WEIGHT = 0.5    # Weight for similarity score
     HARMFULNESS_WEIGHT = 0.5   # Weight for harmfulness score
-    
+
+    # Fallback calibration window, used only until a per-dataset window is
+    # supplied via `observed_min`/`observed_max` (see compute_observed_range).
+    DEFAULT_OBSERVED_MIN = 5.5
+    DEFAULT_OBSERVED_MAX = 8.0
+
     DEFAULT_MODEL = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
 
     def __init__(
@@ -109,15 +118,31 @@ class HateAssessmentSystem:
         model_name: str | None = None,
         *,
         llm=None,
+        observed_min: float | None = None,
+        observed_max: float | None = None,
+        mitigation_thresholds: Tuple[float, float, float] | None = None,
     ):
         """
         Initialize the system with retriever and LLM components.
-        
+
         Args:
             retriever: An instance of RAGRetriever for knowledge base access
             api_key: Together AI API key (required unless llm is provided)
             model_name: Together model id (defaults to Llama-3.3-70B-Instruct-Turbo)
             llm: Optional local/API player with a .generate(prompt, ...) method
+            observed_min: Lower bound of the raw_weighted_score calibration
+                window for this dataset. Compute per-dataset with
+                compute_observed_range() over a sample of raw scores; falls
+                back to DEFAULT_OBSERVED_MIN if not provided.
+            observed_max: Upper bound of the calibration window; falls back
+                to DEFAULT_OBSERVED_MAX if not provided.
+            mitigation_thresholds: (none_max, light_max, mild_max) cut points
+                on the 0-10 hate_score scale, splitting it into four tiers:
+                none < none_max <= light < light_max <= mild < mild_max <= strong.
+                Compute per-dataset with compute_quartile_thresholds() over a
+                sample of hate_score values so each tier is ~equal-sized;
+                falls back to (HATE_THRESHOLD_LOW, HATE_THRESHOLD_MID,
+                HATE_THRESHOLD_HIGH) if not provided.
         """
         self.retriever = retriever
         if llm is not None:
@@ -130,8 +155,64 @@ class HateAssessmentSystem:
                 model_name=model_name or self.DEFAULT_MODEL,
                 api_key=api_key,
             )
-        
-        self.total_mitigation_counts = {"none": 0, "mild": 0, "strong": 0}
+
+        self.observed_min = observed_min if observed_min is not None else self.DEFAULT_OBSERVED_MIN
+        self.observed_max = observed_max if observed_max is not None else self.DEFAULT_OBSERVED_MAX
+
+        self.mitigation_thresholds = mitigation_thresholds or (
+            self.HATE_THRESHOLD_LOW,
+            self.HATE_THRESHOLD_MID,
+            self.HATE_THRESHOLD_HIGH,
+        )
+
+        self.total_mitigation_counts = {"none": 0, "light": 0, "mild": 0, "strong": 0}
+
+    @staticmethod
+    def compute_quartile_thresholds(hate_scores: List[float]) -> Tuple[float, float, float]:
+        """
+        Derive (none_max, light_max, mild_max) cut points as the 25th/50th/75th
+        percentiles of a sample of this dataset's own hate_score values, so
+        each of the four mitigation tiers (none/light/mild/strong) covers
+        ~25% of the data regardless of the distribution's shape.
+        """
+        if len(hate_scores) < 4:
+            return (
+                HateAssessmentSystem.HATE_THRESHOLD_LOW,
+                HateAssessmentSystem.HATE_THRESHOLD_MID,
+                HateAssessmentSystem.HATE_THRESHOLD_HIGH,
+            )
+        q25, q50, q75 = np.percentile(hate_scores, [25, 50, 75])
+        return float(q25), float(q50), float(q75)
+
+    @staticmethod
+    def compute_observed_range(raw_scores: List[float], k: float = 1.5) -> Tuple[float, float]:
+        """
+        Derive a per-dataset calibration window as mean +/- k*stdev of
+        raw_weighted_score, computed from a sample of that dataset's items.
+
+        This replaces a single hardcoded window shared across datasets:
+        datasets with narrower/lower raw-score spreads (e.g. hatexplain)
+        were being squeezed through a window tuned for a different dataset,
+        which is what produced the skewed, floor-clamped hate_score
+        distribution.
+        """
+        if len(raw_scores) < 2:
+            return (
+                HateAssessmentSystem.DEFAULT_OBSERVED_MIN,
+                HateAssessmentSystem.DEFAULT_OBSERVED_MAX,
+            )
+        mu = statistics.mean(raw_scores)
+        sigma = statistics.stdev(raw_scores)
+        return mu - k * sigma, mu + k * sigma
+
+    @staticmethod
+    def linear_calibrate(raw_score: float, observed_min: float, observed_max: float) -> float:
+        """Min-max scale raw_score into 0-10 using the given window, clamped at the ends."""
+        if observed_max <= observed_min:
+            return 0.0
+        t = (raw_score - observed_min) / (observed_max - observed_min)
+        t = max(0.0, min(t, 1.0))
+        return t * 10.0
 
     def assess_query(
         self,
@@ -387,45 +468,30 @@ class HateAssessmentSystem:
         
         # Calculate the average raw score
         raw_final_score = sum(item["raw_weighted_score"] for item in top_scores) / len(top_scores)
-        
-        # ADJUSTED NORMALIZATION APPROACH
-        # Based on empirical observations that scores cluster at the low end
-        
-        # Theoretical range
-        KB_MIN_SCORE = 5.5
-        KB_MAX_SCORE = 10.0
-        
-        # Observed real-world range (adjust these based on your actual data)
-        # Setting a narrower observed range to better distribute scores
-        OBSERVED_MIN = 5.5
-        OBSERVED_MAX = 8.0  # Adjust this based on your actual maximum observed scores
-        
-        # Apply square root transformation to spread out lower values
-        transformed_score = (raw_final_score - OBSERVED_MIN) / (OBSERVED_MAX - OBSERVED_MIN)
-        transformed_score = max(0, min(transformed_score, 1))  # Clamp to 0-1
-        
-        # Apply power transformation to spread values across range
-        # Using square root to give more weight to lower values
-        calibrated_score = math.sqrt(transformed_score) * 10
-        
-        # Ensure we have a minimum non-zero score for any relevant match
-        if len(retrieved_content) > 0 and calibrated_score < 2:
-            calibrated_score = max(calibrated_score, 2.0)
-        
-        # Update the top scores with calibrated values
+
+        # Per-instance calibration window (set via constructor, ideally
+        # derived per-dataset with compute_observed_range()). Linear min-max
+        # scaling, clamped at the ends -- no floor clamp, no sqrt. The
+        # previous sqrt transform compressed the top of the range and the
+        # floor clamp manufactured an artificial spike at 2.0; both are
+        # gone in favor of an honest, per-dataset linear scale.
+        observed_min = self.observed_min
+        observed_max = self.observed_max
+
+        calibrated_score = self.linear_calibrate(raw_final_score, observed_min, observed_max)
+
         for item in top_scores:
-            transformed = (item["raw_weighted_score"] - OBSERVED_MIN) / (OBSERVED_MAX - OBSERVED_MIN)
-            transformed = max(0, min(transformed, 1))
-            item["calibrated_score"] = math.sqrt(transformed) * 10
-        
+            item["calibrated_score"] = self.linear_calibrate(
+                item["raw_weighted_score"], observed_min, observed_max
+            )
+
         assessment_details = {
             "message": f"Evaluated {len(retrieved_content)} relevant counter-speech items",
-            "theoretical_range": {"min": KB_MIN_SCORE, "max": KB_MAX_SCORE},
-            "observed_range": {"min": OBSERVED_MIN, "max": OBSERVED_MAX},
+            "observed_range": {"min": observed_min, "max": observed_max},
             "top_matches": top_scores,
             "raw_score": raw_final_score,
             "calibrated_score": calibrated_score,
-            "calculation_method": "Square root transformation with calibrated range",
+            "calculation_method": "Per-dataset linear min-max scaling (mean +/- 1.5*stdev window)",
             "weights": {
                 "similarity": self.SIMILARITY_WEIGHT,
                 "harmfulness": self.HARMFULNESS_WEIGHT
@@ -433,24 +499,28 @@ class HateAssessmentSystem:
         }
         final_score = calibrated_score
         #print(f"Debug - Final hate score: {final_score}")
-        
+
         return final_score, assessment_details
     
     def _determine_mitigation_level(self, hate_score: float) -> str:
         """
         Determine the appropriate mitigation level based on hate score.
         Updates global counts.
-        
+
         Args:
             hate_score: Calculated hate score (0-10)
-            
+
         Returns:
-            String indicating mitigation level: "none", "mild", or "strong"
+            String indicating mitigation level: "none", "light", "mild", or "strong"
         """
-        if hate_score < self.HATE_THRESHOLD_LOW:
+        none_max, light_max, mild_max = self.mitigation_thresholds
+        if hate_score < none_max:
             self.total_mitigation_counts["none"] += 1
             return "none"
-        elif hate_score < self.HATE_THRESHOLD_HIGH:
+        elif hate_score < light_max:
+            self.total_mitigation_counts["light"] += 1
+            return "light"
+        elif hate_score < mild_max:
             self.total_mitigation_counts["mild"] += 1
             return "mild"
         else:
@@ -482,7 +552,7 @@ class HateAssessmentSystem:
         
     def reset_counts(self):
         """Reset the mitigation counts."""
-        self.total_mitigation_counts = {"none": 0, "mild": 0, "strong": 0}
+        self.total_mitigation_counts = {"none": 0, "light": 0, "mild": 0, "strong": 0}
         
     def _generate_response(self, query: str, retrieved_content: List[Dict], 
                           mitigation_level: str, hate_score: float) -> str:
@@ -502,6 +572,11 @@ class HateAssessmentSystem:
         if mitigation_level == "none":
             # No mitigation needed - normal response
             prompt = self._create_normal_prompt(query, retrieved_content)
+        elif mitigation_level == "light":
+            # Below the mild threshold, but ask the model to double-check
+            # rather than assume benign -- a safety net for borderline scores
+            # and for smaller judge models that may miss subtler content.
+            prompt = self._create_light_mitigation_prompt(query, retrieved_content)
         elif mitigation_level == "mild":
             # Mild mitigation needed
             prompt = self._create_mild_mitigation_prompt(query, retrieved_content)
@@ -533,7 +608,38 @@ Our system has not seen any indication that this query is problematic.
 YOU decide whether this query requires mitigation. If you believe the query contains harmful content or seeks harmful information, mitigate it.
 If you determine the query is NOT problematic, simply answer it directly and factually without any special cautioning or explanation.
 {self._response_output_rules()}"""
-    
+
+    def _create_light_mitigation_prompt(self, query: str, retrieved_content: List[Dict]) -> str:
+        """Create a prompt for the tier between 'none' and 'mild' -- a low
+        retrieval signal that stops short of a confirmed concern, so we ask
+        the model to actively look rather than default to treating it as
+        clean."""
+        counter_examples = []
+        for item in retrieved_content:
+            if item["content"]:
+                counter_examples.append(item["content"])
+
+        prompt = f"""Respond to this user query:
+
+User query: {query}
+
+Our system found a low-level signal that this query may touch on a sensitive or borderline topic, but it did not clear the threshold for a confirmed concern (hate score: low).
+
+Look at the query carefully yourself before answering -- do not assume it is clean just because our system's score was low. If you notice ANY harmful framing, stereotyping, or misinformation, however subtle, respond with a brief, factual clarification that:
+1. Corrects the specific misconception or framing
+2. Stays neutral and non-judgmental in tone
+3. Is 2-3 sentences (40-60 words) maximum
+
+If, after your own review, you are confident the query is benign, answer it directly and factually with no extra caveats.
+{self._response_output_rules()}"""
+
+        if counter_examples:
+            prompt += "\nReference perspectives you may draw on:\n\n"
+            for i, example in enumerate(counter_examples[:2]):
+                prompt += f"Perspective {i+1}: {example}\n\n"
+
+        return prompt
+
     def _create_mild_mitigation_prompt(self, query: str, retrieved_content: List[Dict]) -> str:
         """Create a prompt with mild mitigation for potentially hateful content."""
         # Get counter-speech examples (now the content itself is the counter speech)
